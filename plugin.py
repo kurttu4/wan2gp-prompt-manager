@@ -47,6 +47,13 @@ FILTER_PERIOD_7D = "Last 7 days"
 FILTER_PERIOD_30D = "Last 30 days"
 FILTER_PERIOD_90D = "Last 90 days"
 
+FILTER_RANK_ALL = "All ranks"
+FILTER_RANK_1_PLUS = "1+ Stars"
+FILTER_RANK_2_PLUS = "2+ Stars"
+FILTER_RANK_3_PLUS = "3+ Stars"
+FILTER_RANK_4_PLUS = "4+ Stars"
+FILTER_RANK_5 = "5 Stars"
+
 SORT_NEWEST = "Newest first"
 SORT_OLDEST = "Oldest first"
 SORT_MODEL_AZ = "Model A→Z"
@@ -66,6 +73,8 @@ class PromptManagerPlugin(WAN2GPPlugin):
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.custom_folders_path = os.path.join(self.plugin_dir, "custom_folders.json")
         self.custom_folders = self.load_custom_folders()
+        self.media_ranks_path = os.path.join(self.plugin_dir, "media_ranks.json")
+        self.media_ranks = self.load_media_ranks()
 
     def load_custom_folders(self):
         if os.path.exists(self.custom_folders_path):
@@ -84,6 +93,24 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 json.dump(self.custom_folders, f, indent=4)
         except Exception as e:
             print(f"Error saving custom folders: {e}")
+
+    def load_media_ranks(self):
+        if os.path.exists(self.media_ranks_path):
+            try:
+                with open(self.media_ranks_path, "r", encoding="utf-8") as f:
+                    ranks = json.load(f)
+                    if isinstance(ranks, dict):
+                        return ranks
+            except Exception as e:
+                print(f"Error loading media ranks: {e}")
+        return {}
+
+    def save_media_ranks(self):
+        try:
+            with open(self.media_ranks_path, "w", encoding="utf-8") as f:
+                json.dump(self.media_ranks, f, indent=4)
+        except Exception as e:
+            print(f"Error saving media ranks: {e}")
 
     def get_view_mode_choices(self):
         choices = [VIEW_OUTPUTS, VIEW_LIBRARY]
@@ -590,7 +617,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             .pm-item-thumb img, .pm-item-thumb video {
                 width: 100%;
                 height: 100%;
-                object-fit: cover;
+                object-fit: contain;
             }
             .pm-item-label {
                 padding: 4px 6px;
@@ -654,6 +681,38 @@ class PromptManagerPlugin(WAN2GPPlugin):
             }
             .pm-item.pm-saved {
                 border-color: rgba(234, 179, 8, 0.45);
+            }
+            .pm-rank-stars {
+                position: absolute;
+                bottom: 22px;
+                right: 4px;
+                display: flex;
+                flex-direction: row-reverse;
+                justify-content: flex-end;
+                gap: 2px;
+                opacity: 0;
+                transition: opacity 0.15s ease;
+                z-index: 3;
+                background: rgba(0,0,0,0.55);
+                padding: 2px 4px;
+                border-radius: 4px;
+            }
+            .pm-item:hover .pm-rank-stars,
+            .pm-item.has-rank .pm-rank-stars {
+                opacity: 1;
+            }
+            .pm-rank-star {
+                color: #ccc;
+                font-size: 14px;
+                cursor: pointer;
+                line-height: 1;
+                text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+                transition: color 0.1s ease;
+            }
+            .pm-rank-star:hover,
+            .pm-rank-star:hover ~ .pm-rank-star,
+            .pm-rank-star.filled {
+                color: #fbbf24 !important;
             }
             .pm-metadata {
                 font-family: monospace;
@@ -962,7 +1021,11 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     }
                     element.classList.toggle('selected');
                     const selected = Array.from(grid.querySelectorAll('.pm-item.selected:not(.pm-folder)'));
-                    const paths = selected.map(el => el.dataset.path).filter(Boolean);
+                    const paths = selected.map(el => {
+                        let path = el.dataset.path;
+                        try { path = JSON.parse(path); } catch(e) {}
+                        return path;
+                    }).filter(Boolean);
                     const path = paths.length === 1 ? paths[0] : '';
                     selectedInput.value = path;
                     selectedInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -978,7 +1041,10 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     const dirInput = document.querySelector('#pm-current-dir textarea');
                     const selectedInput = document.querySelector('#pm-selected-file textarea');
                     if (!dirInput) return;
-                    dirInput.value = element.dataset.path || '';
+                    let pathStr = element.dataset.path || '';
+                    let path = pathStr;
+                    try { path = JSON.parse(pathStr); } catch(e) {}
+                    dirInput.value = path;
                     dirInput.dispatchEvent(new Event('input', { bubbles: true }));
                     if (selectedInput) {
                         selectedInput.value = '';
@@ -1012,6 +1078,37 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     deleteInput.dispatchEvent(new Event('input', { bubbles: true }));
                 };
 
+                window.setPromptManagerRank = function(event, element, rank) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const item = element.closest('.pm-item');
+                    if (!item || item.classList.contains('pm-folder')) return;
+                    const path = item.dataset.path;
+                    if (!path) return;
+                    const actionInput = document.querySelector('#pm-rank-action textarea');
+                    if (!actionInput) return;
+                    actionInput.value = rank + '||' + path;
+                    actionInput.dispatchEvent(new Event('input', { bubbles: true }));
+                };
+
+                document.addEventListener('keydown', function(event) {
+                    const activeEl = document.activeElement;
+                    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+                        return;
+                    }
+                    if (['0', '1', '2', '3', '4', '5'].includes(event.key)) {
+                        const selectedItem = document.querySelector('.pm-item.selected:not(.pm-folder)');
+                        if (selectedItem) {
+                            const path = selectedItem.dataset.path;
+                            const actionInput = document.querySelector('#pm-rank-action textarea');
+                            if (path && actionInput) {
+                                actionInput.value = event.key + '||' + path;
+                                actionInput.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
+                        }
+                    }
+                });
+
                 // Custom Fullscreen Overlay Logic
                 let zoomScale = 1;
                 let panX = 0;
@@ -1033,7 +1130,13 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     const container = document.getElementById('pm-fs-content-container');
                     if (!overlay || !container || !element) return;
                     
-                    const path = element.dataset.path;
+                    let pathStr = element.dataset.path;
+                    let path = pathStr;
+                    try {
+                        path = JSON.parse(pathStr);
+                    } catch(e) {}
+                    
+                    const encodedPath = encodeURIComponent(path);
                     const badge = element.querySelector('.pm-type-badge');
                     const isVideo = badge ? badge.textContent.trim() === 'VIDEO' : false;
                     
@@ -1044,9 +1147,9 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     isPanning = false;
                     
                     if (isVideo) {
-                        container.innerHTML = `<video src="/gradio_api/file=${path}" controls autoplay loop style="max-width:100%; max-height:100%; object-fit:contain;"></video>`;
+                        container.innerHTML = `<video src="/gradio_api/file=${encodedPath}" controls autoplay loop style="max-width:100%; max-height:100%; object-fit:contain;"></video>`;
                     } else {
-                        container.innerHTML = `<img src="/gradio_api/file=${path}" style="max-width:100%; max-height:100%; object-fit:contain; transform-origin:center; transition:transform 0.1s ease-out; cursor:grab;" />`;
+                        container.innerHTML = `<img src="/gradio_api/file=${encodedPath}" style="max-width:100%; max-height:100%; object-fit:contain; transform-origin:center; transition:transform 0.1s ease-out; cursor:grab;" />`;
                         
                         const img = container.querySelector('img');
                         img.addEventListener('load', () => {
@@ -1331,6 +1434,18 @@ class PromptManagerPlugin(WAN2GPPlugin):
                             ],
                             value=FILTER_PERIOD_ALL,
                         )
+                        self.filter_rank = gr.Dropdown(
+                            label="Rank",
+                            choices=[
+                                FILTER_RANK_ALL,
+                                FILTER_RANK_1_PLUS,
+                                FILTER_RANK_2_PLUS,
+                                FILTER_RANK_3_PLUS,
+                                FILTER_RANK_4_PLUS,
+                                FILTER_RANK_5,
+                            ],
+                            value=FILTER_RANK_ALL,
+                        )
                         self.filter_sort = gr.Dropdown(
                             label="Sort",
                             choices=[SORT_NEWEST, SORT_OLDEST, SORT_MODEL_AZ, SORT_PROMPT_LEN],
@@ -1430,6 +1545,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 self.current_dir = gr.Text(visible=False, elem_id="pm-current-dir")
                 self.field_action = gr.Text(visible=False, elem_id="pm-field-action")
                 self.delete_action = gr.Text(visible=False, elem_id="pm-delete-action")
+                self.rank_action = gr.Text(visible=False, elem_id="pm-rank-action")
                 self.file_cache = gr.Text(visible=False, elem_id="pm-file-cache")
                 self.add_folder_input = gr.Text(visible=False, elem_id="pm-add-folder-input")
 
@@ -1462,6 +1578,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_search,
             self.filter_sort,
             self.filter_grid_size,
+            self.filter_rank,
         ]
 
         def on_tab_select(
@@ -1475,6 +1592,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             search_q,
             sort_f,
             grid_size_f,
+            rank_f,
             evt: gr.SelectData,
         ):
             if evt.value == "Prompt Manager" and not self.loaded_once:
@@ -1490,6 +1608,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     search_q,
                     sort_f,
                     grid_size_f,
+                    rank_f,
                     rescan=True,
                 )
             return no_grid_updates
@@ -1523,6 +1642,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_search,
             self.filter_sort,
             self.filter_grid_size,
+            self.filter_rank,
         ):
             component.change(
                 fn=lambda *args: self.list_media_files(*args, rescan=False),
@@ -1607,6 +1727,13 @@ class PromptManagerPlugin(WAN2GPPlugin):
             fn=self.remove_from_library,
             inputs=[self.selected_file, self.state],
             outputs=detail_outputs,
+            show_progress="hidden",
+        )
+
+        self.rank_action.change(
+            fn=lambda *args: self.rank_media_file(*args, rescan=False),
+            inputs=list_inputs + [self.rank_action, self.selected_file],
+            outputs=grid_outputs,
             show_progress="hidden",
         )
 
@@ -1933,6 +2060,24 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 root.destroy()
                 if confirm:
                     target_folder = view_mode
+            except ImportError:
+                if os.name == "nt":
+                    try:
+                        import subprocess
+                        ps_cmd = (
+                            "Add-Type -AssemblyName PresentationFramework; "
+                            "$msg = 'Are you sure you want to remove this custom folder from Prompt Manager?`n`n" + view_mode.replace("'", "''") + "`n`n(This will not delete the files on disk.)'; "
+                            "$res = [System.Windows.MessageBox]::Show($msg, 'Remove Custom Folder', 'YesNo'); "
+                            "if ($res -eq 'Yes') { Write-Output '1' }"
+                        )
+                        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, check=False)
+                        if res.returncode == 0 and res.stdout.strip() == "1":
+                            target_folder = view_mode
+                    except Exception as pe:
+                        print(f"PowerShell messagebox failed: {pe}")
+                        target_folder = view_mode
+                else:
+                    target_folder = view_mode
             except Exception as e:
                 print(f"Error showing confirmation dialog: {e}")
                 target_folder = view_mode
@@ -1961,6 +2106,32 @@ class PromptManagerPlugin(WAN2GPPlugin):
                         target_folder = self.custom_folders[num]
                     else:
                         gr.Warning("Invalid folder selection number.")
+            except ImportError:
+                if os.name == "nt":
+                    try:
+                        import subprocess
+                        msg = "Enter the number of the custom folder you want to remove:`n`n"
+                        for idx, path in enumerate(self.custom_folders):
+                            msg += f"{idx + 1}. {path}`n"
+                        ps_cmd = (
+                            "Add-Type -AssemblyName Microsoft.VisualBasic; "
+                            f"$res = [Microsoft.VisualBasic.Interaction]::InputBox('{msg.replace(chr(39), chr(39)+chr(39))}', 'Remove Custom Folder', ''); "
+                            "Write-Output $res"
+                        )
+                        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, check=False)
+                        if res.returncode == 0:
+                            ans = res.stdout.strip()
+                            if ans and ans.isdigit():
+                                num = int(ans) - 1
+                                if 0 <= num < len(self.custom_folders):
+                                    target_folder = self.custom_folders[num]
+                                else:
+                                    gr.Warning("Invalid folder selection number.")
+                    except Exception as pe:
+                        print(f"PowerShell inputbox failed: {pe}")
+                        gr.Warning("Could not show folder removal dialog.")
+                else:
+                    gr.Warning("Could not show folder removal dialog (tkinter missing).")
             except Exception as e:
                 print(f"Error showing folder choice dialog: {e}")
                 gr.Warning("Could not show folder removal dialog.")
@@ -2036,7 +2207,6 @@ class PromptManagerPlugin(WAN2GPPlugin):
         except Exception as e:
             print(f"Zenity folder dialog failed or is not available: {e}")
 
-        # Fallback to tkinter if zenity was not executed or failed
         if not zenity_success:
             try:
                 import tkinter as tk
@@ -2051,6 +2221,24 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     title="Select Custom Folder to Add"
                 )
                 root.destroy()
+            except ImportError:
+                if os.name == "nt":
+                    try:
+                        import subprocess
+                        ps_cmd = (
+                            "Add-Type -AssemblyName System.windows.forms; "
+                            "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                            "$f.Description = 'Select Custom Folder to Add'; "
+                            "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }"
+                        )
+                        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, check=False)
+                        if res.returncode == 0:
+                            folder_path = res.stdout.strip()
+                    except Exception as pe:
+                        print(f"PowerShell folder dialog failed: {pe}")
+                        gr.Warning("Could not open system file dialog.")
+                else:
+                    gr.Warning("Could not open system file dialog (tkinter not found).")
             except Exception as e:
                 print(f"Error opening tkinter folder dialog: {e}")
                 gr.Warning("Could not open system file dialog. Please verify GUI/display settings.")
@@ -2275,10 +2463,17 @@ class PromptManagerPlugin(WAN2GPPlugin):
             "source_path": abs_path,
             "file_exists": True,
             "tags": library_entry.get("tags", []) if library_entry else [],
+            "rank": self.media_ranks.get(abs_path, 0),
         }
 
     def _library_entries_as_grid(self):
-        return [library_entry_to_grid_entry(entry) for entry in self._get_library_entries()]
+        entries = []
+        for entry in self._get_library_entries():
+            grid_entry = library_entry_to_grid_entry(entry)
+            abs_path = grid_entry.get("source_path", "")
+            grid_entry["rank"] = self.media_ranks.get(abs_path, 0) if abs_path else 0
+            entries.append(grid_entry)
+        return entries
 
     def _scan_media_entries(self, state, current_dir="", roots=None):
         if roots is None:
@@ -2373,7 +2568,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             sorted_entries.sort(key=lambda entry: entry.get("created", 0), reverse=True)
         return sorted_entries
 
-    def _apply_filters(self, entries, filter_model, filter_media, filter_period, search_query=""):
+    def _apply_filters(self, entries, filter_model, filter_media, filter_period, filter_rank, search_query=""):
         filtered = list(entries)
         if filter_media == FILTER_MEDIA_IMAGE:
             filtered = [entry for entry in filtered if entry["is_image"]]
@@ -2386,6 +2581,18 @@ class PromptManagerPlugin(WAN2GPPlugin):
 
         if filter_model and filter_model != FILTER_MODEL_ALL:
             filtered = [entry for entry in filtered if entry["model"] == filter_model]
+
+        if filter_rank and filter_rank != FILTER_RANK_ALL:
+            if filter_rank == FILTER_RANK_5:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) == 5]
+            elif filter_rank == FILTER_RANK_4_PLUS:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 4]
+            elif filter_rank == FILTER_RANK_3_PLUS:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 3]
+            elif filter_rank == FILTER_RANK_2_PLUS:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 2]
+            elif filter_rank == FILTER_RANK_1_PLUS:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 1]
 
         search_query = (search_query or "").strip().lower()
         if search_query:
@@ -2446,6 +2653,17 @@ class PromptManagerPlugin(WAN2GPPlugin):
             label = entry["created_label"]
             safe_path = json.dumps(file_path, ensure_ascii=False)
             saved_class = " pm-saved" if entry.get("is_saved") or entry.get("is_library") else ""
+            
+            rank = entry.get("rank", 0)
+            has_rank_class = " has-rank" if rank > 0 else ""
+            saved_class += has_rank_class
+            
+            rank_html = '<div class="pm-rank-stars">'
+            for i in range(5, 0, -1):
+                filled = " filled" if i <= rank else ""
+                rank_html += f'<div class="pm-rank-star{filled}" onclick="setPromptManagerRank(event, this, {i})">★</div>'
+            rank_html += '</div>'
+            
             fav_badge = '<span class="pm-fav-badge">★</span>' if entry.get("is_saved") or entry.get("is_library") else ""
             delete_title = "Remove from library" if entry.get("is_library") else "Delete file"
             items_html += f"""
@@ -2453,6 +2671,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 <button class="pm-delete-btn" onclick="deletePromptManagerItem(event, this)" title="{html.escape(delete_title)}">×</button>
                 {fav_badge}
                 <span class="pm-type-badge">{media_badge}</span>
+                {rank_html}
                 <div class="pm-item-thumb">{thumb_html}</div>
                 <div class="pm-item-label" title="{html.escape(basename)}">{html.escape(label)}</div>
             </div>
@@ -2495,12 +2714,13 @@ class PromptManagerPlugin(WAN2GPPlugin):
         search_query="",
         sort_by=SORT_NEWEST,
         grid_size=GRID_SIZE_COMFORTABLE,
+        filter_rank=FILTER_RANK_ALL,
         rescan=True,
     ):
         if view_mode == VIEW_LIBRARY:
             file_entries = self._library_entries_as_grid()
             filtered_entries = self._apply_filters(
-                file_entries, filter_model, filter_media, filter_period, search_query
+                file_entries, filter_model, filter_media, filter_period, filter_rank, search_query
             )
             filtered_entries = self._apply_sort(filtered_entries, sort_by)
             grid_html = self._render_grid_html([], filtered_entries, grid_size)
@@ -2567,7 +2787,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             filter_model = FILTER_MODEL_ALL
 
         filtered_entries = self._apply_filters(
-            file_entries, filter_model, filter_media, filter_period, search_query
+            file_entries, filter_model, filter_media, filter_period, filter_rank, search_query
         )
         filtered_entries = self._apply_sort(filtered_entries, sort_by)
         grid_html = self._render_grid_html(folder_items, filtered_entries, grid_size)
@@ -2615,6 +2835,66 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     print(f"Could not delete metadata file {metadata_path}: {exc}")
         return True
 
+    def rank_media_file(
+        self,
+        current_state,
+        current_dir,
+        file_cache,
+        filter_model,
+        filter_media,
+        filter_period,
+        view_mode,
+        search_query,
+        sort_by,
+        grid_size,
+        filter_rank,
+        action_str,
+        selected_file,
+        rescan=False,
+    ):
+        if action_str and "||" in action_str:
+            rank_str, path = action_str.split("||", 1)
+            try:
+                rank = int(rank_str)
+                if rank == 0:
+                    self.media_ranks.pop(path, None)
+                else:
+                    self.media_ranks[path] = rank
+                self.save_media_ranks()
+
+                if file_cache:
+                    try:
+                        cache_data = json.loads(file_cache)
+                        file_entries = cache_data.get("files", []) if isinstance(cache_data, dict) else (cache_data if isinstance(cache_data, list) else [])
+                        for entry in file_entries:
+                            entry_path = entry.get("source_path") if entry.get("is_library") else entry.get("path")
+                            if entry_path == path:
+                                entry["rank"] = rank
+                                break
+                        if isinstance(cache_data, dict):
+                            cache_data["files"] = file_entries
+                            file_cache = json.dumps(cache_data, ensure_ascii=False)
+                        else:
+                            file_cache = json.dumps(file_entries, ensure_ascii=False)
+                    except Exception:
+                        pass
+            except ValueError:
+                pass
+        return self.list_media_files(
+            current_state,
+            current_dir,
+            file_cache,
+            filter_model,
+            filter_media,
+            filter_period,
+            view_mode,
+            search_query,
+            sort_by,
+            grid_size,
+            filter_rank,
+            rescan=False,
+        )
+
     def delete_media_file(
         self,
         current_state,
@@ -2627,6 +2907,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         search_query,
         sort_by,
         grid_size,
+        filter_rank,
         delete_path,
         selected_file,
         rescan=True,
@@ -2644,6 +2925,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 search_query,
                 sort_by,
                 grid_size,
+                filter_rank,
                 rescan=False,
             )
 
@@ -2664,6 +2946,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 search_query,
                 sort_by,
                 grid_size,
+                filter_rank,
                 rescan=True,
             )
 
@@ -2685,6 +2968,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             search_query,
             sort_by,
             grid_size,
+            filter_rank,
             rescan=True,
         )
 
@@ -2715,6 +2999,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         search_query,
         sort_by,
         grid_size,
+        filter_rank,
         selected_files_json,
         selected_file,
     ):
@@ -2732,6 +3017,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 search_query,
                 sort_by,
                 grid_size,
+                filter_rank,
                 rescan=False,
             )
 
@@ -2755,6 +3041,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             search_query,
             sort_by,
             grid_size,
+            filter_rank,
             rescan=True,
         )
 
@@ -2770,6 +3057,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         search_query,
         sort_by,
         grid_size,
+        filter_rank,
         selected_files_json,
         tags_text,
     ):
@@ -2787,6 +3075,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 search_query,
                 sort_by,
                 grid_size,
+                filter_rank,
                 rescan=False,
             )
 
@@ -2811,6 +3100,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             search_query,
             sort_by,
             grid_size,
+            filter_rank,
             rescan=True,
         )
 
@@ -2856,6 +3146,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         search_query,
         sort_by,
         grid_size,
+        filter_rank,
     ):
         if upload_file is None:
             return self.list_media_files(
@@ -2869,6 +3160,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 search_query,
                 sort_by,
                 grid_size,
+                filter_rank,
                 rescan=False,
             )
 
@@ -2891,6 +3183,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 search_query,
                 sort_by,
                 grid_size,
+                filter_rank,
                 rescan=False,
             )
 
@@ -2905,6 +3198,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
             search_query,
             sort_by,
             grid_size,
+            filter_rank,
             rescan=True,
         )
 

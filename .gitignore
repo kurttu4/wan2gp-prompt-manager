@@ -13,4 +13,5 @@ dist/
 build/
 .DS_Store
 Thumbs.db
-prompts_library.json
+prompts_library.jsoncustom_folders.json
+media_ranks.json
