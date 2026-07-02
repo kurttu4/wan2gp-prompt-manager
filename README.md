@@ -135,6 +135,22 @@ If you installed via the Plugins UI from GitHub, use **Update** on the plugin in
 
 ## Changelog
 
+### v1.4.1
+
+```
+feat: add 5-star ranking system and filter, fix thumbnail blurriness, add Windows native dialog fallbacks, fix Windows path parsing
+```
+
+- **5-Star Ranking System:**
+  - Added a 0-5 stars ranking system for all media files, stored persistently in `media_ranks.json`.
+  - Set ranks using the `1-5` keyboard keys or by clicking the star overlay that appears on hover.
+  - Instantly filters and updates the UI without requiring a full library refresh.
+  - Added a new Rank filter to the Search & Filters sidebar to easily find your best generations.
+- **Bug Fixes:**
+  - Fixed an issue where thumbnails appeared blurred or cropped by changing CSS `object-fit` to `contain`.
+  - Fixed Windows folder selection dialogs by adding native PowerShell fallbacks when `zenity` and `tkinter` are unavailable (common in embedded Python environments).
+  - Fixed a path parsing bug on Windows that prevented fullscreen view, folder navigation, and bulk actions from working due to improperly escaped JSON strings.
+
 ### v1.4.0
 
 ```
@@ -153,22 +169,6 @@ feat: add sidebar collapse toggle, interactive fullscreen view (zoom/pan/arrows)
   - Custom folders are listed inside the `View` dropdown menu.
   - Added an `"All Folders"` option to aggregate and view files from all default outputs and custom folders combined.
   - Added a `➖` button to remove custom folders, prompting with confirmation or selection dialog.
-
-### v1.4.1
-
-```
-feat: add 5-star ranking system and filter, fix thumbnail blurriness, add Windows native dialog fallbacks, fix Windows path parsing
-```
-
-- **5-Star Ranking System:**
-  - Added a 0-5 stars ranking system for all media files, stored persistently in `media_ranks.json`.
-  - Set ranks using the `1-5` keyboard keys or by clicking the star overlay that appears on hover.
-  - Instantly filters and updates the UI without requiring a full library refresh.
-  - Added a new Rank filter to the Search & Filters sidebar to easily find your best generations.
-- **Bug Fixes:**
-  - Fixed an issue where thumbnails appeared blurred or cropped by changing CSS `object-fit` to `contain`.
-  - Fixed Windows folder selection dialogs by adding native PowerShell fallbacks when `zenity` and `tkinter` are unavailable (common in embedded Python environments).
-  - Fixed a path parsing bug on Windows that prevented fullscreen view, folder navigation, and bulk actions from working due to improperly escaped JSON strings.
 
 ### v1.3.1
 
