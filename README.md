@@ -4,11 +4,15 @@ Browse your generated images and videos, inspect their embedded metadata, and se
 
 Works with **both images and videos** that contain WanGP generation metadata.
 
-## Screenshot
+## Screenshots
 
 Three-column layout with sidebar controls, thumbnail grid, and metadata preview (v1.4.0):
 
 ![Prompt Manager](screens/005.png)
+
+Prompt Manager with pagination, search, and native dialog improvements (v1.4.2):
+
+![Prompt Manager v1.4.2](screens/006.png)
 
 ## Features
 
