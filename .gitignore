@@ -15,3 +15,4 @@ build/
 Thumbs.db
 prompts_library.json
 media_ranks.json
+.thumbnails/

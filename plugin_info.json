@@ -1,10 +1,10 @@
 {
   "name": "Prompt Manager",
   "author": "David Brum",
-  "version": "1.3.1",
+  "version": "1.4.2",
   "description": "Browse generated images and videos with search, sort, and grid size controls. Copy metadata, generate in-plugin, manage a saved library with export/import, and bulk actions on multi-select.",
   "type": ["app"],
-  "date": "2026-06-29",
+  "date": "2026-07-03",
   "wan2gp_version": "",
   "url": "https://github.com/davidbrum25/wan2gp-prompt-manager"
 }

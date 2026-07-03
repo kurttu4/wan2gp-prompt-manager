@@ -4,10 +4,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import concurrent.futures
 from datetime import datetime, timedelta
 
 import gradio as gr
 from PIL import Image
+import math
 
 from shared.utils.plugins import WAN2GPPlugin
 
@@ -21,7 +23,7 @@ from .library_store import (
     remove_by_id,
     upsert_entry,
 )
-from .media_utils import get_thumbnails_in_batch
+from .media_utils import get_thumbnails_in_batch, delete_cached_thumbnail
 
 VIEW_OUTPUTS = "Outputs"
 VIEW_LIBRARY = "Saved Library"
@@ -48,10 +50,10 @@ FILTER_PERIOD_30D = "Last 30 days"
 FILTER_PERIOD_90D = "Last 90 days"
 
 FILTER_RANK_ALL = "All ranks"
-FILTER_RANK_1_PLUS = "1+ Stars"
-FILTER_RANK_2_PLUS = "2+ Stars"
-FILTER_RANK_3_PLUS = "3+ Stars"
-FILTER_RANK_4_PLUS = "4+ Stars"
+FILTER_RANK_1 = "1 Star"
+FILTER_RANK_2 = "2 Stars"
+FILTER_RANK_3 = "3 Stars"
+FILTER_RANK_4 = "4 Stars"
 FILTER_RANK_5 = "5 Stars"
 
 SORT_NEWEST = "Newest first"
@@ -75,6 +77,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         self.custom_folders = self.load_custom_folders()
         self.media_ranks_path = os.path.join(self.plugin_dir, "media_ranks.json")
         self.media_ranks = self.load_media_ranks()
+        self._file_metadata_cache = {}
 
     def load_custom_folders(self):
         if os.path.exists(self.custom_folders_path):
@@ -1072,7 +1075,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                         ? 'Remove this saved prompt from the library?'
                         : 'Delete this file from disk?';
                     if (!confirm(msg)) return;
-                    const deleteInput = document.querySelector('#pm-delete-action textarea');
+                    const deleteInput = document.querySelector('#pm-delete-action textarea, #pm-delete-action input');
                     if (!deleteInput) return;
                     deleteInput.value = path;
                     deleteInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1085,7 +1088,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     if (!item || item.classList.contains('pm-folder')) return;
                     const path = item.dataset.path;
                     if (!path) return;
-                    const actionInput = document.querySelector('#pm-rank-action textarea');
+                    const actionInput = document.querySelector('#pm-rank-action textarea, #pm-rank-action input');
                     if (!actionInput) return;
                     actionInput.value = rank + '||' + path;
                     actionInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1100,7 +1103,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                         const selectedItem = document.querySelector('.pm-item.selected:not(.pm-folder)');
                         if (selectedItem) {
                             const path = selectedItem.dataset.path;
-                            const actionInput = document.querySelector('#pm-rank-action textarea');
+                            const actionInput = document.querySelector('#pm-rank-action textarea, #pm-rank-action input');
                             if (path && actionInput) {
                                 actionInput.value = event.key + '||' + path;
                                 actionInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1409,10 +1412,14 @@ class PromptManagerPlugin(WAN2GPPlugin):
                         self.filter_count = gr.Markdown("", elem_id="pm-filter-count")
 
                         gr.Markdown("Search & filters", elem_classes="pm-section-label")
-                        self.filter_search = gr.Textbox(
-                            label="Search",
-                            placeholder="Prompt, model, filename, tags...",
-                        )
+                        with gr.Row():
+                            self.filter_search = gr.Textbox(
+                                label="Search",
+                                placeholder="Prompt, model, filename, tags...",
+                                scale=5,
+                                show_label=False
+                            )
+                            self.search_btn = gr.Button("🔍", variant="secondary", scale=1, min_width=40)
                         self.filter_model = gr.Dropdown(
                             label="Model",
                             choices=[FILTER_MODEL_ALL],
@@ -1438,10 +1445,10 @@ class PromptManagerPlugin(WAN2GPPlugin):
                             label="Rank",
                             choices=[
                                 FILTER_RANK_ALL,
-                                FILTER_RANK_1_PLUS,
-                                FILTER_RANK_2_PLUS,
-                                FILTER_RANK_3_PLUS,
-                                FILTER_RANK_4_PLUS,
+                                FILTER_RANK_1,
+                                FILTER_RANK_2,
+                                FILTER_RANK_3,
+                                FILTER_RANK_4,
                                 FILTER_RANK_5,
                             ],
                             value=FILTER_RANK_ALL,
@@ -1508,6 +1515,20 @@ class PromptManagerPlugin(WAN2GPPlugin):
                             value="<div class='pm-grid'><p class='placeholder'>Click 'Refresh Files' to load your outputs.</p></div>",
                             elem_id="pm-grid-container",
                         )
+                        with gr.Row(elem_id="pm-pagination-row", visible=True):
+                            self.page_prev_btn = gr.Button("◀ Prev", size="sm", min_width=60)
+                            self.page_info = gr.Markdown("Page 1 of 1", elem_classes="pm-page-info")
+                            self.page_next_btn = gr.Button("Next ▶", size="sm", min_width=60)
+                            self.items_per_page = gr.Dropdown(
+                                choices=[10, 25, 50, 100],
+                                value=50,
+                                label="Items/page",
+                                show_label=False,
+                                scale=1,
+                                min_width=80,
+                                container=False
+                            )
+                        self.current_page = gr.State(1)
 
                     with gr.Column(elem_id="pm-detail-panel"):
                         with gr.Column(visible=False, elem_id="pm-preview-container") as self.preview_row:
@@ -1564,6 +1585,8 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_count,
             self.bulk_row,
             self.bulk_count,
+            self.current_page,
+            self.page_info,
         ]
         no_grid_updates = {comp: gr.update() for comp in grid_outputs}
 
@@ -1579,39 +1602,23 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_sort,
             self.filter_grid_size,
             self.filter_rank,
+            self.current_page,
+            self.items_per_page,
         ]
 
         def on_tab_select(
-            current_state,
-            current_dir,
-            cache,
-            model_f,
-            media_f,
-            period_f,
-            view_mode,
-            search_q,
-            sort_f,
-            grid_size_f,
-            rank_f,
-            evt: gr.SelectData,
+            current_state, current_dir, cache, model_f, media_f, period_f,
+            view_mode, search_q, sort_f, grid_size_f, rank_f,
+            cur_page, per_page, evt: gr.SelectData,
         ):
             if evt.value == "Prompt Manager" and not self.loaded_once:
                 self.loaded_once = True
                 return self.list_media_files(
-                    current_state,
-                    current_dir,
-                    cache,
-                    model_f,
-                    media_f,
-                    period_f,
-                    view_mode,
-                    search_q,
-                    sort_f,
-                    grid_size_f,
-                    rank_f,
-                    rescan=True,
+                    current_state, current_dir, cache, model_f, media_f,
+                    period_f, view_mode, search_q, sort_f, grid_size_f,
+                    rank_f, cur_page, per_page, rescan=True,
                 )
-            return no_grid_updates
+            return {comp: gr.update() for comp in grid_outputs}
 
         self.main_tabs.select(
             fn=on_tab_select,
@@ -1639,7 +1646,6 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_media,
             self.filter_period,
             self.view_mode,
-            self.filter_search,
             self.filter_sort,
             self.filter_grid_size,
             self.filter_rank,
@@ -1650,6 +1656,39 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 outputs=grid_outputs,
                 show_progress="hidden",
             )
+            
+        self.filter_search.submit(
+            fn=lambda *args: self.list_media_files(*args, rescan=False),
+            inputs=list_inputs,
+            outputs=grid_outputs,
+            show_progress="hidden",
+        )
+        self.search_btn.click(
+            fn=lambda *args: self.list_media_files(*args, rescan=False),
+            inputs=list_inputs,
+            outputs=grid_outputs,
+            show_progress="hidden",
+        )
+
+        def on_next_page(*args):
+            args_list = list(args)
+            args_list[-2] += 1
+            return self.list_media_files(*args_list, rescan=False)
+            
+        def on_prev_page(*args):
+            args_list = list(args)
+            if args_list[-2] > 1:
+                args_list[-2] -= 1
+            return self.list_media_files(*args_list, rescan=False)
+            
+        def on_items_change(*args):
+            args_list = list(args)
+            args_list[-2] = 1
+            return self.list_media_files(*args_list, rescan=False)
+
+        self.page_next_btn.click(fn=on_next_page, inputs=list_inputs, outputs=grid_outputs, show_progress="hidden")
+        self.page_prev_btn.click(fn=on_prev_page, inputs=list_inputs, outputs=grid_outputs, show_progress="hidden")
+        self.items_per_page.change(fn=on_items_change, inputs=list_inputs, outputs=grid_outputs, show_progress="hidden")
 
         detail_outputs = [
             self.metadata_html,
@@ -1731,14 +1770,14 @@ class PromptManagerPlugin(WAN2GPPlugin):
         )
 
         self.rank_action.change(
-            fn=lambda *args: self.rank_media_file(*args, rescan=False),
+            fn=self.rank_media_file,
             inputs=list_inputs + [self.rank_action, self.selected_file],
             outputs=grid_outputs,
             show_progress="hidden",
         )
 
         self.delete_action.change(
-            fn=lambda *args: self.delete_media_file(*args, rescan=True),
+            fn=self.delete_media_file,
             inputs=list_inputs + [self.delete_action, self.selected_file],
             outputs=grid_outputs,
             show_progress="hidden",
@@ -2006,6 +2045,109 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 roots.append(path)
         return roots
 
+    def _pick_folder_dialog(self, title="Select Folder"):
+        """Open the system's default folder picker dialog. Returns the selected
+        path as a string, or empty string if the user cancelled."""
+        if os.name == "nt":
+            return self._pick_folder_windows(title)
+        elif sys.platform == "darwin":
+            return self._pick_folder_macos(title)
+        else:
+            return self._pick_folder_linux(title)
+
+    def _pick_folder_windows(self, title):
+        """Use PowerShell + Shell.Application for the modern Windows folder picker."""
+        try:
+            ps_cmd = (
+                "$shell = New-Object -ComObject Shell.Application; "
+                f"$folder = $shell.BrowseForFolder(0, '{title.replace(chr(39), chr(39)+chr(39))}', 0x00000050, 0); "
+                "if ($folder) { Write-Output $folder.Self.Path }"
+            )
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, text=True, check=False
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception as e:
+            print(f"Windows folder dialog failed: {e}")
+        # Fallback to tkinter
+        return self._pick_folder_tkinter(title)
+
+    def _pick_folder_macos(self, title):
+        """Use osascript for the native macOS folder picker."""
+        try:
+            script = f'tell application "Finder" to set folderPath to POSIX path of (choose folder with prompt "{title}")'
+            res = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, check=False
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception as e:
+            print(f"macOS folder dialog failed: {e}")
+        return self._pick_folder_tkinter(title)
+
+    def _pick_folder_linux(self, title):
+        """Try the desktop environment's default folder picker:
+        1. zenity (GTK/GNOME, XFCE, etc.)
+        2. kdialog (KDE/Plasma)
+        3. tkinter fallback
+        """
+
+        # 1. Try zenity (GTK — the default on GNOME, XFCE, etc.)
+        try:
+            res = subprocess.run(
+                ["zenity", "--file-selection", "--directory", f"--title={title}"],
+                capture_output=True, text=True, check=False, timeout=120
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+            elif res.returncode == 1:
+                return ""  # User cancelled
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"zenity folder dialog failed: {e}")
+
+        # 2. Try kdialog (KDE/Plasma)
+        try:
+            res = subprocess.run(
+                ["kdialog", "--getexistingdirectory", os.path.expanduser("~"), "--title", title],
+                capture_output=True, text=True, check=False, timeout=120
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+            elif res.returncode == 1:
+                return ""  # User cancelled
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"kdialog folder dialog failed: {e}")
+
+        # 3. Fallback to tkinter
+        return self._pick_folder_tkinter(title)
+
+    def _pick_folder_tkinter(self, title):
+        """Last-resort fallback using tkinter's built-in folder picker."""
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            folder_path = filedialog.askdirectory(parent=root, title=title)
+            root.destroy()
+            return folder_path or ""
+        except ImportError:
+            gr.Warning("Could not open a folder picker dialog (tkinter not available).")
+            return ""
+        except Exception as e:
+            print(f"tkinter folder dialog failed: {e}")
+            gr.Warning("Could not open system file dialog.")
+            return ""
+
     def remove_custom_folder(
         self,
         current_state,
@@ -2034,6 +2176,8 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_count,
             self.bulk_row,
             self.bulk_count,
+            self.current_page,
+            self.page_info,
             self.view_mode,
             self.add_folder_input,
         ]
@@ -2186,63 +2330,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         sort_by,
         grid_size,
     ):
-        folder_path = ""
-        zenity_success = False
-        try:
-            import subprocess
-            # Try to run zenity for native folder selection dialog
-            res = subprocess.run(
-                ["zenity", "--file-selection", "--directory", "--title=Select Custom Folder to Add"],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            if res.returncode == 0:
-                folder_path = res.stdout.strip()
-                zenity_success = True
-            elif res.returncode == 1:
-                # Dialog was explicitly cancelled by the user
-                folder_path = ""
-                zenity_success = True
-        except Exception as e:
-            print(f"Zenity folder dialog failed or is not available: {e}")
-
-        if not zenity_success:
-            try:
-                import tkinter as tk
-                from tkinter import filedialog
-                
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                
-                folder_path = filedialog.askdirectory(
-                    parent=root,
-                    title="Select Custom Folder to Add"
-                )
-                root.destroy()
-            except ImportError:
-                if os.name == "nt":
-                    try:
-                        import subprocess
-                        ps_cmd = (
-                            "Add-Type -AssemblyName System.windows.forms; "
-                            "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                            "$f.Description = 'Select Custom Folder to Add'; "
-                            "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }"
-                        )
-                        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, check=False)
-                        if res.returncode == 0:
-                            folder_path = res.stdout.strip()
-                    except Exception as pe:
-                        print(f"PowerShell folder dialog failed: {pe}")
-                        gr.Warning("Could not open system file dialog.")
-                else:
-                    gr.Warning("Could not open system file dialog (tkinter not found).")
-            except Exception as e:
-                print(f"Error opening tkinter folder dialog: {e}")
-                gr.Warning("Could not open system file dialog. Please verify GUI/display settings.")
-            
+        folder_path = self._pick_folder_dialog("Select Custom Folder to Add")
         folder_path = (folder_path or "").strip()
         if not folder_path:
             add_folder_outputs = [
@@ -2260,6 +2348,8 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 self.filter_count,
                 self.bulk_row,
                 self.bulk_count,
+                self.current_page,
+                self.page_info,
                 self.view_mode,
                 self.add_folder_input,
             ]
@@ -2311,6 +2401,8 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_count,
             self.bulk_row,
             self.bulk_count,
+            self.current_page,
+            self.page_info,
             self.view_mode,
             self.add_folder_input,
         ]
@@ -2431,16 +2523,30 @@ class PromptManagerPlugin(WAN2GPPlugin):
             if entry.get("source_path")
         }
 
-    def _describe_file(self, state, file_path, saved_paths=None):
-        configs, _, _ = self.get_settings_from_file(state, file_path, False, False, False)
+    def _describe_file(self, state, file_path, saved_paths=None, library_map=None):
+        abs_path = os.path.abspath(file_path)
+        try:
+            stat = os.stat(abs_path)
+            mtime = stat.st_mtime
+            size = stat.st_size
+        except Exception:
+            mtime, size = 0, 0
+            
+        cached = self._file_metadata_cache.get(abs_path)
+        if cached and cached[0] == mtime and cached[1] == size:
+            configs = cached[2]
+        else:
+            configs, _, _ = self.get_settings_from_file(state, file_path, False, False, False)
+            self._file_metadata_cache[abs_path] = (mtime, size, configs)
+            
         is_video = self.has_video_file_extension(file_path)
         is_image = self.has_image_file_extension(file_path)
         model_name = self._format_model_name(configs) if configs else "Unknown model"
         prompt = (configs.get("prompt") or "") if configs else ""
         created_ts = os.path.getctime(file_path)
-        abs_path = os.path.abspath(file_path)
-        saved_paths = saved_paths or self._get_saved_source_paths()
-        library_entry = find_by_source_path(self._get_library_entries(), abs_path)
+        saved_paths = saved_paths or set()
+        library_map = library_map or {}
+        library_entry = library_map.get(abs_path)
         return {
             "path": abs_path,
             "basename": os.path.basename(file_path),
@@ -2533,8 +2639,32 @@ class PromptManagerPlugin(WAN2GPPlugin):
 
         folder_items.sort(key=lambda item: item["name"].lower())
         file_paths.sort(key=os.path.getctime, reverse=True)
-        saved_paths = self._get_saved_source_paths()
-        file_entries = [self._describe_file(state, path, saved_paths) for path in file_paths]
+        
+        library_entries = self._get_library_entries()
+        saved_paths = {
+            os.path.abspath(entry.get("source_path", ""))
+            for entry in library_entries
+            if entry.get("source_path")
+        }
+        library_map = {
+            os.path.abspath(entry.get("source_path", "")): entry
+            for entry in library_entries
+            if entry.get("source_path")
+        }
+        
+        file_entries = []
+        if file_paths:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                futures = [
+                    executor.submit(self._describe_file, state, path, saved_paths, library_map)
+                    for path in file_paths
+                ]
+                for future in futures:
+                    try:
+                        file_entries.append(future.result())
+                    except Exception as e:
+                        print(f"Error parsing file metadata: {e}")
+                        
         return folder_items, file_entries, cur_abs
 
     def _period_cutoff(self, period_label):
@@ -2568,6 +2698,47 @@ class PromptManagerPlugin(WAN2GPPlugin):
             sorted_entries.sort(key=lambda entry: entry.get("created", 0), reverse=True)
         return sorted_entries
 
+    def _apply_filters_and_paginate(self, entries, folder_items, filter_model, filter_media, filter_period, filter_rank, search_query, sort_by, current_page, items_per_page, grid_size, cache_data, current_dir, model_choices):
+        entries = self._apply_filters(entries, filter_model, filter_media, filter_period, filter_rank, search_query)
+        entries = self._apply_sort(entries, sort_by)
+
+        total_items = len(entries)
+        current_page = max(1, int(current_page))
+        items_per_page = int(items_per_page)
+        total_pages = max(1, math.ceil(total_items / items_per_page)) if total_items > 0 else 1
+        current_page = min(current_page, total_pages)
+
+        start_idx = (current_page - 1) * items_per_page
+        end_idx = start_idx + items_per_page
+        paged_entries = entries[start_idx:end_idx]
+
+        grid_html = self._render_grid_html(folder_items, paged_entries, grid_size)
+        
+        page_info = f"Page {current_page} of {total_pages}"
+        
+        clear_metadata = (
+            "<div class='pm-metadata'><p class='placeholder'>Select a file to view metadata.</p></div>"
+        )
+        
+        return {
+            self.grid_html: grid_html,
+            self.selected_file: "",
+            self.selected_files: "[]",
+            self.metadata_html: clear_metadata,
+            self.preview_row: gr.Column(visible=False),
+            self.video_preview: gr.Video(value=None, visible=False),
+            self.image_preview: gr.Image(value=None, visible=False),
+            self.use_all_btn: gr.Button(visible=False, interactive=False),
+            self.current_dir: current_dir if current_dir else "",
+            self.file_cache: json.dumps(cache_data),
+            self.filter_model: gr.Dropdown(choices=model_choices, value=filter_model),
+            self.filter_count: f"Showing **{len(paged_entries)}** of **{total_items}** files",
+            self.bulk_row: gr.Column(visible=False),
+            self.bulk_count: "",
+            self.current_page: current_page,
+            self.page_info: page_info,
+        }
+
     def _apply_filters(self, entries, filter_model, filter_media, filter_period, filter_rank, search_query=""):
         filtered = list(entries)
         if filter_media == FILTER_MEDIA_IMAGE:
@@ -2585,14 +2756,14 @@ class PromptManagerPlugin(WAN2GPPlugin):
         if filter_rank and filter_rank != FILTER_RANK_ALL:
             if filter_rank == FILTER_RANK_5:
                 filtered = [entry for entry in filtered if entry.get("rank", 0) == 5]
-            elif filter_rank == FILTER_RANK_4_PLUS:
-                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 4]
-            elif filter_rank == FILTER_RANK_3_PLUS:
-                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 3]
-            elif filter_rank == FILTER_RANK_2_PLUS:
-                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 2]
-            elif filter_rank == FILTER_RANK_1_PLUS:
-                filtered = [entry for entry in filtered if entry.get("rank", 0) >= 1]
+            elif filter_rank == FILTER_RANK_4:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) == 4]
+            elif filter_rank == FILTER_RANK_3:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) == 3]
+            elif filter_rank == FILTER_RANK_2:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) == 2]
+            elif filter_rank == FILTER_RANK_1:
+                filtered = [entry for entry in filtered if entry.get("rank", 0) == 1]
 
         search_query = (search_query or "").strip().lower()
         if search_query:
@@ -2700,6 +2871,8 @@ class PromptManagerPlugin(WAN2GPPlugin):
             self.filter_count: "",
             self.bulk_row: gr.Column(visible=False),
             self.bulk_count: "",
+            self.current_page: 1,
+            self.page_info: "Page 1 of 1",
         }
 
     def list_media_files(
@@ -2715,39 +2888,18 @@ class PromptManagerPlugin(WAN2GPPlugin):
         sort_by=SORT_NEWEST,
         grid_size=GRID_SIZE_COMFORTABLE,
         filter_rank=FILTER_RANK_ALL,
+        current_page=1,
+        items_per_page=50,
         rescan=True,
     ):
         if view_mode == VIEW_LIBRARY:
             file_entries = self._library_entries_as_grid()
-            filtered_entries = self._apply_filters(
-                file_entries, filter_model, filter_media, filter_period, filter_rank, search_query
-            )
-            filtered_entries = self._apply_sort(filtered_entries, sort_by)
-            grid_html = self._render_grid_html([], filtered_entries, grid_size)
-            total = len(file_entries)
-            shown = len(filtered_entries)
-            clear_metadata = (
-                "<div class='pm-metadata'><p class='placeholder'>Select a saved prompt to view details.</p></div>"
-            )
             model_choices = self._model_filter_choices(file_entries)
             if filter_model not in model_choices:
                 filter_model = FILTER_MODEL_ALL
-            return {
-                self.grid_html: grid_html,
-                self.selected_file: "",
-                self.selected_files: "[]",
-                self.metadata_html: clear_metadata,
-                self.preview_row: gr.Column(visible=False),
-                self.video_preview: gr.Video(value=None, visible=False),
-                self.image_preview: gr.Image(value=None, visible=False),
-                self.use_all_btn: gr.Button(visible=False, interactive=False),
-                self.current_dir: "",
-                self.file_cache: "",
-                self.filter_model: gr.Dropdown(choices=model_choices, value=filter_model),
-                self.filter_count: f"Showing **{shown}** of **{total}** saved prompts",
-                self.bulk_row: gr.Column(visible=False),
-                self.bulk_count: "",
-            }
+            return self._apply_filters_and_paginate(
+                file_entries, [], filter_model, filter_media, filter_period, filter_rank, search_query, sort_by, current_page, items_per_page, grid_size, [], "", model_choices
+            )
 
         folder_items = []
         file_entries = []
@@ -2756,10 +2908,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         roots = self._resolve_roots_for_view(view_mode)
         if rescan or not (file_cache or "").strip():
             folder_items, file_entries, cur_abs = self._scan_media_entries(current_state, current_dir, roots)
-            cache_json = json.dumps(
-                {"folders": folder_items, "files": file_entries, "dir": cur_abs},
-                ensure_ascii=False,
-            )
+            cache_data = {"folders": folder_items, "files": file_entries, "dir": cur_abs}
         else:
             folder_items = []
             file_entries = []
@@ -2777,7 +2926,6 @@ class PromptManagerPlugin(WAN2GPPlugin):
             if not cur_abs:
                 cur = (current_dir or "").strip()
                 cur_abs = os.path.abspath(cur) if cur else ""
-            cache_json = file_cache
 
         if not file_entries and not folder_items:
             return self._empty_grid_response(cur_abs, "[]")
@@ -2786,34 +2934,9 @@ class PromptManagerPlugin(WAN2GPPlugin):
         if filter_model not in model_choices:
             filter_model = FILTER_MODEL_ALL
 
-        filtered_entries = self._apply_filters(
-            file_entries, filter_model, filter_media, filter_period, filter_rank, search_query
+        return self._apply_filters_and_paginate(
+            file_entries, folder_items, filter_model, filter_media, filter_period, filter_rank, search_query, sort_by, current_page, items_per_page, grid_size, cache_data, cur_abs, model_choices
         )
-        filtered_entries = self._apply_sort(filtered_entries, sort_by)
-        grid_html = self._render_grid_html(folder_items, filtered_entries, grid_size)
-        clear_metadata = (
-            "<div class='pm-metadata'><p class='placeholder'>Select a file to view metadata.</p></div>"
-        )
-        total = len(file_entries)
-        shown = len(filtered_entries)
-        count_text = f"Showing **{shown}** of **{total}** files"
-
-        return {
-            self.grid_html: grid_html,
-            self.selected_file: "",
-            self.selected_files: "[]",
-            self.metadata_html: clear_metadata,
-            self.preview_row: gr.Column(visible=False),
-            self.video_preview: gr.Video(value=None, visible=False),
-            self.image_preview: gr.Image(value=None, visible=False),
-            self.use_all_btn: gr.Button(visible=False, interactive=False),
-            self.current_dir: cur_abs if cur_abs else "",
-            self.file_cache: cache_json,
-            self.filter_model: gr.Dropdown(choices=model_choices, value=filter_model),
-            self.filter_count: count_text,
-            self.bulk_row: gr.Column(visible=False),
-            self.bulk_count: "",
-        }
 
     def _delete_file_from_disk(self, file_path):
         if not file_path or not os.path.exists(file_path):
@@ -2821,6 +2944,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
 
         try:
             os.remove(file_path)
+            delete_cached_thumbnail(file_path)
         except Exception as exc:
             gr.Warning(f"Could not delete file: {exc}")
             return False
@@ -2835,23 +2959,11 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     print(f"Could not delete metadata file {metadata_path}: {exc}")
         return True
 
-    def rank_media_file(
-        self,
-        current_state,
-        current_dir,
-        file_cache,
-        filter_model,
-        filter_media,
-        filter_period,
-        view_mode,
-        search_query,
-        sort_by,
-        grid_size,
-        filter_rank,
-        action_str,
-        selected_file,
-        rescan=False,
-    ):
+    def rank_media_file(self, *args):
+        action_str = args[-2]
+        selected_file = args[-1]
+        list_args = list(args[:-2])
+        file_cache = list_args[2]
         if action_str and "||" in action_str:
             rank_str, path = action_str.split("||", 1)
             try:
@@ -2880,54 +2992,16 @@ class PromptManagerPlugin(WAN2GPPlugin):
                         pass
             except ValueError:
                 pass
-        return self.list_media_files(
-            current_state,
-            current_dir,
-            file_cache,
-            filter_model,
-            filter_media,
-            filter_period,
-            view_mode,
-            search_query,
-            sort_by,
-            grid_size,
-            filter_rank,
-            rescan=False,
-        )
+        list_args[2] = file_cache
+        return self.list_media_files(*list_args, rescan=False)
 
-    def delete_media_file(
-        self,
-        current_state,
-        current_dir,
-        file_cache,
-        filter_model,
-        filter_media,
-        filter_period,
-        view_mode,
-        search_query,
-        sort_by,
-        grid_size,
-        filter_rank,
-        delete_path,
-        selected_file,
-        rescan=True,
-    ):
+    def delete_media_file(self, *args):
+        delete_path = args[-2]
+        selected_file = args[-1]
+        list_args = list(args[:-2])
         delete_path = (delete_path or "").strip()
         if not delete_path:
-            return self.list_media_files(
-                current_state,
-                current_dir,
-                file_cache,
-                filter_model,
-                filter_media,
-                filter_period,
-                view_mode,
-                search_query,
-                sort_by,
-                grid_size,
-                filter_rank,
-                rescan=False,
-            )
+            return self.list_media_files(*list_args, rescan=False)
 
         if self._is_library_path(delete_path):
             entry_id = self._parse_library_id(delete_path)
@@ -2935,42 +3009,16 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 gr.Info("Removed from library.")
             else:
                 gr.Warning("Could not remove saved prompt.")
-            return self.list_media_files(
-                current_state,
-                current_dir,
-                file_cache,
-                filter_model,
-                filter_media,
-                filter_period,
-                VIEW_LIBRARY,
-                search_query,
-                sort_by,
-                grid_size,
-                filter_rank,
-                rescan=True,
-            )
+            
+            list_args[6] = VIEW_LIBRARY
+            return self.list_media_files(*list_args, rescan=True)
 
         if self._delete_file_from_disk(delete_path):
             gr.Info(f"Deleted '{os.path.basename(delete_path)}'.")
-            if selected_file == delete_path:
-                selected_file = ""
         else:
             gr.Warning(f"Failed to delete '{os.path.basename(delete_path)}'.")
 
-        return self.list_media_files(
-            current_state,
-            current_dir,
-            file_cache,
-            filter_model,
-            filter_media,
-            filter_period,
-            view_mode,
-            search_query,
-            sort_by,
-            grid_size,
-            filter_rank,
-            rescan=True,
-        )
+        return self.list_media_files(*list_args, rescan=True)
 
     def _parse_selected_paths(self, selected_files_json):
         try:
@@ -2987,39 +3035,14 @@ class PromptManagerPlugin(WAN2GPPlugin):
             return gr.Column(visible=False), ""
         return gr.Column(visible=True), f"**{count}** items selected"
 
-    def bulk_delete_selected(
-        self,
-        current_state,
-        current_dir,
-        file_cache,
-        filter_model,
-        filter_media,
-        filter_period,
-        view_mode,
-        search_query,
-        sort_by,
-        grid_size,
-        filter_rank,
-        selected_files_json,
-        selected_file,
-    ):
+    def bulk_delete_selected(self, *args):
+        selected_file = args[-1]
+        selected_files_json = args[-2]
+        list_args = list(args[:-2])
         paths = self._parse_selected_paths(selected_files_json)
         if len(paths) < 2:
             gr.Warning("Select at least two items for bulk delete.")
-            return self.list_media_files(
-                current_state,
-                current_dir,
-                file_cache,
-                filter_model,
-                filter_media,
-                filter_period,
-                view_mode,
-                search_query,
-                sort_by,
-                grid_size,
-                filter_rank,
-                rescan=False,
-            )
+            return self.list_media_files(*list_args, rescan=False)
 
         deleted = 0
         for path in paths:
@@ -3030,54 +3053,17 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 deleted += 1
 
         gr.Info(f"Deleted {deleted} of {len(paths)} selected items.")
-        return self.list_media_files(
-            current_state,
-            current_dir,
-            file_cache,
-            filter_model,
-            filter_media,
-            filter_period,
-            view_mode,
-            search_query,
-            sort_by,
-            grid_size,
-            filter_rank,
-            rescan=True,
-        )
+        return self.list_media_files(*list_args, rescan=True)
 
-    def bulk_save_to_library(
-        self,
-        current_state,
-        current_dir,
-        file_cache,
-        filter_model,
-        filter_media,
-        filter_period,
-        view_mode,
-        search_query,
-        sort_by,
-        grid_size,
-        filter_rank,
-        selected_files_json,
-        tags_text,
-    ):
+    def bulk_save_to_library(self, *args):
+        tags_text = args[-1]
+        selected_files_json = args[-2]
+        list_args = list(args[:-2])
+        current_state = list_args[0]
         paths = self._parse_selected_paths(selected_files_json)
         if len(paths) < 2:
             gr.Warning("Select at least two items to save.")
-            return self.list_media_files(
-                current_state,
-                current_dir,
-                file_cache,
-                filter_model,
-                filter_media,
-                filter_period,
-                view_mode,
-                search_query,
-                sort_by,
-                grid_size,
-                filter_rank,
-                rescan=False,
-            )
+            return self.list_media_files(*list_args, rescan=False)
 
         saved = 0
         for path in paths:
@@ -3089,20 +3075,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 saved += 1
 
         gr.Info(f"Saved {saved} of {len(paths)} items to library.")
-        return self.list_media_files(
-            current_state,
-            current_dir,
-            file_cache,
-            filter_model,
-            filter_media,
-            filter_period,
-            view_mode,
-            search_query,
-            sort_by,
-            grid_size,
-            filter_rank,
-            rescan=True,
-        )
+        return self.list_media_files(*list_args, rescan=True)
 
     def bulk_export_prompts(self, selected_files_json, state):
         paths = self._parse_selected_paths(selected_files_json)
@@ -3133,36 +3106,9 @@ class PromptManagerPlugin(WAN2GPPlugin):
         gr.Info("Library exported.")
         return gr.File(value=export_path, visible=True)
 
-    def import_library_file(
-        self,
-        upload_file,
-        current_state,
-        current_dir,
-        file_cache,
-        filter_model,
-        filter_media,
-        filter_period,
-        view_mode,
-        search_query,
-        sort_by,
-        grid_size,
-        filter_rank,
-    ):
+    def import_library_file(self, upload_file, *list_args):
         if upload_file is None:
-            return self.list_media_files(
-                current_state,
-                current_dir,
-                file_cache,
-                filter_model,
-                filter_media,
-                filter_period,
-                view_mode,
-                search_query,
-                sort_by,
-                grid_size,
-                filter_rank,
-                rescan=False,
-            )
+            return self.list_media_files(*list_args, rescan=False)
 
         try:
             path = upload_file if isinstance(upload_file, str) else upload_file.name
@@ -3172,35 +3118,9 @@ class PromptManagerPlugin(WAN2GPPlugin):
             gr.Info(f"Imported {added} entries ({skipped} skipped as duplicates).")
         except Exception as exc:
             gr.Warning(f"Could not import library: {exc}")
-            return self.list_media_files(
-                current_state,
-                current_dir,
-                file_cache,
-                filter_model,
-                filter_media,
-                filter_period,
-                view_mode,
-                search_query,
-                sort_by,
-                grid_size,
-                filter_rank,
-                rescan=False,
-            )
+            return self.list_media_files(*list_args, rescan=False)
 
-        return self.list_media_files(
-            current_state,
-            current_dir,
-            file_cache,
-            filter_model,
-            filter_media,
-            filter_period,
-            VIEW_LIBRARY,
-            search_query,
-            sort_by,
-            grid_size,
-            filter_rank,
-            rescan=True,
-        )
+        return self.list_media_files(*list_args, rescan=True)
 
     def _get_library_entry(self, file_path):
         if not self._is_library_path(file_path):

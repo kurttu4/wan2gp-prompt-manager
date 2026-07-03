@@ -2,6 +2,10 @@ import json
 import os
 import uuid
 from datetime import datetime
+import threading
+
+_library_cache = None
+_library_lock = threading.Lock()
 
 
 def library_file_path(plugin_dir: str) -> str:
@@ -9,24 +13,38 @@ def library_file_path(plugin_dir: str) -> str:
 
 
 def load_library(plugin_dir: str) -> list[dict]:
-    path = library_file_path(plugin_dir)
-    if not os.path.isfile(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as reader:
-            payload = json.load(reader)
-        if isinstance(payload, list):
-            return [entry for entry in payload if isinstance(entry, dict)]
-    except Exception as exc:
-        print(f"[Prompt Manager] Could not read library file: {exc}")
-    return []
+    global _library_cache
+    if _library_cache is not None:
+        return _library_cache
+    
+    with _library_lock:
+        if _library_cache is not None:
+            return _library_cache
+        
+        path = library_file_path(plugin_dir)
+        if not os.path.isfile(path):
+            _library_cache = []
+            return _library_cache
+        try:
+            with open(path, "r", encoding="utf-8") as reader:
+                payload = json.load(reader)
+            if isinstance(payload, list):
+                _library_cache = [entry for entry in payload if isinstance(entry, dict)]
+                return _library_cache
+        except Exception as exc:
+            print(f"[Prompt Manager] Could not read library file: {exc}")
+        _library_cache = []
+        return _library_cache
 
 
 def save_library(plugin_dir: str, entries: list[dict]) -> None:
-    path = library_file_path(plugin_dir)
-    os.makedirs(plugin_dir, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as writer:
-        json.dump(entries, writer, indent=2, ensure_ascii=False)
+    global _library_cache
+    with _library_lock:
+        _library_cache = entries
+        path = library_file_path(plugin_dir)
+        os.makedirs(plugin_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as writer:
+            json.dump(entries, writer, indent=2, ensure_ascii=False)
 
 
 def find_by_source_path(entries: list[dict], source_path: str) -> dict | None:

@@ -2,7 +2,52 @@ import os
 import base64
 import io
 import math
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
+
+THUMBNAILS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".thumbnails")
+os.makedirs(THUMBNAILS_DIR, exist_ok=True)
+
+def _get_thumbnail_hash_path(file_path):
+    path_hash = hashlib.md5(os.path.abspath(file_path).encode('utf-8')).hexdigest()
+    return os.path.join(THUMBNAILS_DIR, f"{path_hash}.b64")
+
+def _read_cached_thumbnail(file_path):
+    try:
+        cache_path = _get_thumbnail_hash_path(file_path)
+        if os.path.exists(cache_path) and os.path.exists(file_path):
+            if os.path.getmtime(cache_path) >= os.path.getmtime(file_path):
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return f.read(), file_path
+    except Exception:
+        pass
+    return None, None
+
+def _write_cached_thumbnail(file_path, b64_str):
+    try:
+        cache_path = _get_thumbnail_hash_path(file_path)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            f.write(b64_str)
+    except Exception:
+        pass
+
+def delete_cached_thumbnail(file_path):
+    try:
+        cache_path = _get_thumbnail_hash_path(file_path)
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+    except Exception:
+        pass
+
+def _process_single_thumbnail(file_path, generator_func):
+    cached, path = _read_cached_thumbnail(file_path)
+    if cached:
+        return cached, path
+    
+    b64_str, path = generator_func(file_path)
+    if b64_str:
+        _write_cached_thumbnail(file_path, b64_str)
+    return b64_str, path
 
 from PIL import Image
 
@@ -119,7 +164,7 @@ if os.name == "nt":
         results = []
         try:
             for file_path in file_paths_chunk:
-                results.append(get_thumbnail_as_base64(file_path))
+                results.append(_process_single_thumbnail(file_path, get_thumbnail_as_base64))
         finally:
             comtypes.CoUninitialize()
         return results
@@ -127,18 +172,28 @@ if os.name == "nt":
 else:
 
     def get_thumbnail_as_base64(file_path, size=256):
+        try:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
+                with Image.open(file_path) as img:
+                    img.thumbnail((size, size))
+                    buffer = io.BytesIO()
+                    img.convert("RGB").save(buffer, format="JPEG", quality=80)
+                    return base64.b64encode(buffer.getvalue()).decode("utf-8"), file_path
+        except Exception:
+            pass
         return None, file_path
 
     def process_thumbnail_chunk(file_paths_chunk):
-        return [get_thumbnail_as_base64(path) for path in file_paths_chunk]
+        return [_process_single_thumbnail(path, get_thumbnail_as_base64) for path in file_paths_chunk]
 
 
 def get_thumbnails_in_batch(file_paths):
-    if not file_paths or os.name != "nt":
+    if not file_paths:
         return {}
 
     results = {}
-    num_workers = min(os.cpu_count() * 2, 16)
+    num_workers = min(os.cpu_count() * 2, 16) if os.cpu_count() else 4
     chunk_size = math.ceil(len(file_paths) / num_workers) if file_paths else 0
     if chunk_size == 0:
         return {}

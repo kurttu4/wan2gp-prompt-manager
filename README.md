@@ -135,6 +135,30 @@ If you installed via the Plugins UI from GitHub, use **Update** on the plugin in
 
 ## Changelog
 
+### v1.4.2
+
+```
+feat: implement pagination, file-based thumbnail caching, search box improvements, and native cross-platform file browsers
+```
+
+- **Pagination & Slicing:**
+  - Added Prev/Next page buttons and an items-per-page dropdown (10, 25, 50, 100) to the media grid.
+  - Slices media rendering on the backend, dramatically speeding up interface loading and reducing browser memory overhead for directories with thousands of generations.
+- **File-Based Thumbnail Caching:**
+  - Implemented persistent file-based caching inside `.thumbnails/`. Base64-encoded thumbnail data is written to disk and only re-generated if the source file's modification time changes.
+  - Automatically cleans up the cached thumbnail when the source file is deleted from within the app.
+- **Search Box Optimization:**
+  - Search query no longer filters on every keystroke, removing typing lag.
+  - Added a search button (🔍) next to the search box. Pressing Enter or clicking the button triggers the search action.
+- **Background Library Caching:**
+  - Integrated in-memory caching for `library_store.py` to prevent redundant disk reads and make browsing the Saved Library instantaneous.
+- **Cross-Platform Native Dialogs:**
+  - Refactored custom folder browsing to automatically detect and invoke the user's desktop environment default folder picker.
+  - Uses modern `Shell.Application` COM picker on Windows, macOS native folder picker, and GTK/KDE pickers on Linux (Zenity/Kdialog), with Tkinter as a last-resort fallback.
+- **Bug Fixes:**
+  - Fixed Gradio event signature mismatches for `on_tab_select`, delete, rank, and bulk actions.
+  - Changed Rank filter to exactly match the selected star count.
+
 ### v1.4.1
 
 ```
