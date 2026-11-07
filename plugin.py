@@ -1989,7 +1989,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     gr.Button(visible=False),
                     gr.Column(visible=True),
                     gr.Image(value=None, visible=False),
-                    gr.Video(value=output_path, visible=True),
+                    gr.Video(value=self._safe_preview_path(output_path), visible=True),
                 )
             if self.has_image_file_extension(output_path):
                 return (
@@ -2036,13 +2036,41 @@ class PromptManagerPlugin(WAN2GPPlugin):
 
         return blocks
 
+    def _live_server_config(self):
+        cfg = {}
+        try:
+            cfg.update(self.server_config or {})
+        except Exception:
+            pass
+        # Re-read wgp_config.json so changes made in Configuration -> Outputs are picked up
+        # even if Wan2GP replaced the server_config dict after the plugin grabbed it.
+        for cfg_path in (os.path.join(os.getcwd(), "wgp_config.json"),):
+            try:
+                if os.path.isfile(cfg_path):
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        for k in ("save_path", "image_save_path", "audio_save_path"):
+                            if data.get(k):
+                                cfg[k] = data[k]
+            except Exception as e:
+                print(f"[PromptManager] Could not read {cfg_path}: {e}")
+        return cfg
+
     def _output_roots(self):
-        save_path = os.path.abspath(self.server_config.get("save_path", "outputs"))
-        image_save_path = os.path.abspath(self.server_config.get("image_save_path", "outputs"))
+        cfg = self._live_server_config()
+        save_path = os.path.abspath(cfg.get("save_path") or "outputs")
+        image_save_path = os.path.abspath(cfg.get("image_save_path") or "outputs")
+        audio_save_path = os.path.abspath(cfg.get("audio_save_path") or save_path)
         roots = []
-        for path in (save_path, image_save_path):
+        for path in (save_path, image_save_path, audio_save_path):
             if path and os.path.isdir(path) and path not in roots:
                 roots.append(path)
+        if not roots:
+            roots = [os.path.abspath("outputs")]
+        if getattr(self, "_last_logged_roots", None) != roots:
+            self._last_logged_roots = list(roots)
+            print(f"[PromptManager] Output roots: {roots}")
         return roots
 
     def _pick_folder_dialog(self, title="Select Folder"):
@@ -2536,7 +2564,13 @@ class PromptManagerPlugin(WAN2GPPlugin):
         if cached and cached[0] == mtime and cached[1] == size:
             configs = cached[2]
         else:
-            configs, _, _ = self.get_settings_from_file(state, file_path, False, False, False)
+            try:
+                configs, _, _ = self.get_settings_from_file(state, file_path, False, False, False)
+            except Exception as e:
+                import traceback
+                print(f"[PromptManager] get_settings_from_file failed for {file_path}: {e!r}")
+                traceback.print_exc()
+                configs = None
             self._file_metadata_cache[abs_path] = (mtime, size, configs)
             
         is_video = self.has_video_file_extension(file_path)
@@ -3137,6 +3171,27 @@ class PromptManagerPlugin(WAN2GPPlugin):
             return ""
         return file_path
 
+    def _safe_preview_path(self, file_path):
+        """Gradio refuses files outside cwd/temp or with odd names (e.g. '{date(...'). 
+        For videos, serve a sanitized copy from the system temp dir instead."""
+        try:
+            if not file_path or not os.path.isfile(file_path) or not self.has_video_file_extension(file_path):
+                return file_path
+            import hashlib, shutil
+            abs_path = os.path.abspath(file_path)
+            st = os.stat(abs_path)
+            key = hashlib.md5(f"{abs_path}|{st.st_mtime}|{st.st_size}".encode("utf-8")).hexdigest()[:16]
+            ext = os.path.splitext(abs_path)[1].lower() or ".mp4"
+            cache_dir = os.path.join(tempfile.gettempdir(), "pm_preview_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            safe_path = os.path.join(cache_dir, f"{key}{ext}")
+            if not os.path.isfile(safe_path):
+                shutil.copyfile(abs_path, safe_path)
+            return safe_path
+        except Exception as e:
+            print(f"[PromptManager] Could not prepare preview for {file_path}: {e!r}")
+            return file_path
+
     def _load_configs(self, state, file_path):
         if not file_path:
             return None
@@ -3145,8 +3200,14 @@ class PromptManagerPlugin(WAN2GPPlugin):
             if not entry:
                 return None
             return dict(entry.get("settings") or {})
-        configs, _, _ = self.get_settings_from_file(state, file_path, True, True, True)
-        return configs
+        try:
+            configs, _, _ = self.get_settings_from_file(state, file_path, True, True, True)
+        except Exception as e:
+            import traceback
+            print(f"[PromptManager] get_settings_from_file failed for {file_path}: {e!r}")
+            traceback.print_exc()
+            configs = None
+        return configs or {}
 
     def _library_entry_from_file(self, state, file_path, tags_text=""):
         configs = self._load_configs(state, file_path)
@@ -3332,7 +3393,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
 
         if preview_path and self.has_video_file_extension(preview_path):
             updates[self.preview_row] = gr.Column(visible=True)
-            updates[self.video_preview] = gr.Video(value=preview_path, visible=True)
+            updates[self.video_preview] = gr.Video(value=self._safe_preview_path(preview_path), visible=True)
             updates[self.image_preview] = gr.Image(value=None, visible=False)
         elif preview_path and self.has_image_file_extension(preview_path):
             updates[self.preview_row] = gr.Column(visible=True)
