@@ -5,6 +5,6 @@
   "description": "Browse generated images and videos with search, sort, and grid size controls. Copy metadata, generate in-plugin, manage a saved library with export/import, and bulk actions on multi-select.",
   "type": ["app"],
   "date": "2026-11-08",
-  "wan2gp_version": " "12.23"",
+  "wan2gp_version": "12.23",
   "url": "https://github.com/kurttu4/wan2gp-prompt-manager"
 }
