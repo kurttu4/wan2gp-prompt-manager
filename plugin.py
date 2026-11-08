@@ -358,10 +358,50 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 background-color: var(--background-fill-secondary);
                 border-radius: 8px;
             }
+            #pm-layout {
+                --pm-detail-base: 320px;
+                --pm-detail-factor: 1;
+            }
+            #pm-layout.sidebar-collapsed {
+                --pm-detail-base: 420px;
+            }
+            #pm-detail-resizer {
+                flex: 0 0 8px !important;
+                width: 8px !important;
+                min-width: 8px !important;
+                max-width: 8px !important;
+                padding: 0 !important;
+                margin: 0 -10px !important;
+                cursor: col-resize;
+                position: relative;
+                z-index: 5;
+                border-radius: 4px;
+                transition: background-color 0.15s ease;
+            }
+            #pm-detail-resizer::after {
+                content: "";
+                position: absolute;
+                top: 50%;
+                left: 3px;
+                width: 2px;
+                height: 40px;
+                transform: translateY(-50%);
+                border-radius: 2px;
+                background-color: var(--border-color-primary);
+            }
+            #pm-detail-resizer:hover,
+            #pm-detail-resizer.dragging {
+                background-color: var(--background-fill-secondary);
+            }
+            #pm-detail-resizer:hover::after,
+            #pm-detail-resizer.dragging::after {
+                background-color: var(--primary-500);
+            }
             #pm-detail-panel {
-                flex: 0 0 320px;
-                max-width: 380px;
-                min-width: 280px;
+                flex: 0 0 calc(var(--pm-detail-base) * var(--pm-detail-factor)) !important;
+                width: calc(var(--pm-detail-base) * var(--pm-detail-factor)) !important;
+                max-width: none !important;
+                min-width: var(--pm-detail-base) !important;
                 max-height: 82vh;
                 overflow-y: auto !important;
                 overflow-x: hidden !important;
@@ -826,6 +866,34 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 border: 1px dashed #6e789f4f !important;
                 font-size: 12px;
             }
+            #pm_info .pm-lbl {
+                color: var(--primary-500);
+                font-weight: 600;
+                white-space: nowrap;
+                width: auto;
+                border-bottom: none !important;
+                padding-bottom: 0;
+            }
+            #pm_info .pm-val {
+                font-weight: bold;
+                word-wrap: break-word;
+                word-break: break-word;
+                white-space: pre-wrap;
+                border-top: none !important;
+                padding-top: 2px;
+            }
+            #pm_info .pm-ico {
+                width: 34px;
+                padding: 2px !important;
+                text-align: center;
+                vertical-align: middle;
+            }
+            #pm_info .pm-ico-stack {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 4px;
+            }
             #pm-filter-count {
                 font-size: 12px;
                 color: var(--body-text-color-subdued);
@@ -935,6 +1003,22 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 object-fit: contain;
                 outline: none;
             }
+            #pm-volume-bar {
+                display: none;
+                align-items: center;
+                gap: 8px;
+                padding: 4px 8px;
+                font-size: 12px;
+                color: var(--body-text-color-subdued, #888);
+            }
+            #pm-volume-bar input[type=range] {
+                flex: 1;
+                min-width: 60px;
+                cursor: pointer;
+                accent-color: var(--color-accent, #f97316);
+            }
+            #pm-volume-bar .pm-vol-icon { cursor: pointer; user-select: none; }
+            #pm-volume-bar .pm-vol-val { min-width: 34px; text-align: right; }
         """
 
         js = """
@@ -994,9 +1078,9 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 };
 
                 window.copyPromptManagerValue = function(button) {
-                    const row = button.closest('tr');
+                    const row = button.closest('tbody') || button.closest('tr');
                     if (!row) return;
-                    const valueNode = row.querySelector('td b');
+                    const valueNode = row.querySelector('.pm-val b') || row.querySelector('td b');
                     const text = valueNode ? valueNode.innerText : '';
                     if (!text) return;
                     const done = () => {
@@ -1337,6 +1421,152 @@ class PromptManagerPlugin(WAN2GPPlugin):
                         window.closeFullscreen();
                     }
                 });
+
+                // Resizable detail (info) panel: base width never shrinks, can be stretched up to 1.5x
+                (function() {
+                    const KEY = 'pm-detail-factor';
+                    const MAX = 1.5;
+                    const clamp = (v) => Math.min(MAX, Math.max(1, v));
+                    const layout = () => document.getElementById('pm-layout');
+                    const panel = () => document.getElementById('pm-detail-panel');
+                    const baseWidth = () => {
+                        const l = layout();
+                        const v = l ? parseFloat(getComputedStyle(l).getPropertyValue('--pm-detail-base')) : NaN;
+                        return isNaN(v) ? 320 : v;
+                    };
+                    const setFactor = (f, persist) => {
+                        const l = layout();
+                        if (!l) return;
+                        f = clamp(f);
+                        l.style.setProperty('--pm-detail-factor', String(f));
+                        if (persist) localStorage.setItem(KEY, String(f));
+                    };
+                    const ensureHandle = () => {
+                        const p = panel();
+                        if (!p || !p.parentElement) return false;
+                        if (document.getElementById('pm-detail-resizer')) return true;
+                        const handle = document.createElement('div');
+                        handle.id = 'pm-detail-resizer';
+                        handle.title = 'Drag to resize info panel (double-click to reset)';
+                        p.parentElement.insertBefore(handle, p);
+                        let startX = 0, startW = 0, dragging = false;
+                        handle.addEventListener('mousedown', (e) => {
+                            e.preventDefault();
+                            dragging = true;
+                            startX = e.clientX;
+                            startW = p.getBoundingClientRect().width;
+                            handle.classList.add('dragging');
+                            document.body.style.userSelect = 'none';
+                            document.body.style.cursor = 'col-resize';
+                        });
+                        document.addEventListener('mousemove', (e) => {
+                            if (!dragging) return;
+                            const newW = startW + (startX - e.clientX);
+                            setFactor(newW / baseWidth(), false);
+                        });
+                        document.addEventListener('mouseup', () => {
+                            if (!dragging) return;
+                            dragging = false;
+                            handle.classList.remove('dragging');
+                            document.body.style.userSelect = '';
+                            document.body.style.cursor = '';
+                            const l = layout();
+                            const f = l ? parseFloat(l.style.getPropertyValue('--pm-detail-factor')) : 1;
+                            localStorage.setItem(KEY, String(isNaN(f) ? 1 : f));
+                        });
+                        handle.addEventListener('dblclick', () => setFactor(1, true));
+                        return true;
+                    };
+                    let tries = 0;
+                    const init = () => {
+                        if (ensureHandle()) {
+                            const saved = parseFloat(localStorage.getItem(KEY));
+                            if (!isNaN(saved)) setFactor(saved, false);
+                        } else if (tries++ < 30) {
+                            setTimeout(init, 500);
+                        }
+                    };
+                    setTimeout(init, 500);
+                })();
+
+                // Volume control for preview players (Gradio's video player has none)
+                (function() {
+                    const KEY = 'pm-volume';
+                    const getVol = () => {
+                        const v = parseFloat(localStorage.getItem(KEY));
+                        return isNaN(v) ? 1 : Math.min(1, Math.max(0, v));
+                    };
+                    const videos = () => document.querySelectorAll('#pm-preview-container video, #pm-fs-content-container video');
+                    const applyVol = () => {
+                        const v = getVol();
+                        videos().forEach(el => {
+                            if (Math.abs(el.volume - v) > 0.001) el.volume = v;
+                            el.muted = (v === 0);
+                        });
+                    };
+                    const refreshBar = () => {
+                        const bar = document.getElementById('pm-volume-bar');
+                        if (!bar) return;
+                        const hasVideo = Array.from(document.querySelectorAll('#pm-preview-container video')).some(el => el.offsetParent !== null);
+                        bar.style.display = hasVideo ? 'flex' : 'none';
+                        const v = getVol();
+                        bar.querySelector('input').value = Math.round(v * 100);
+                        bar.querySelector('.pm-vol-val').textContent = Math.round(v * 100) + '%';
+                        bar.querySelector('.pm-vol-icon').textContent = v === 0 ? '🔇' : (v < 0.5 ? '🔉' : '🔊');
+                    };
+                    const ensureBar = () => {
+                        const container = document.getElementById('pm-preview-container');
+                        if (!container) return;
+                        if (!document.getElementById('pm-volume-bar')) {
+                            const bar = document.createElement('div');
+                            bar.id = 'pm-volume-bar';
+                            bar.innerHTML = '<span class="pm-vol-icon" title="Mute / unmute"></span>' +
+                                '<input type="range" min="0" max="100" step="1" title="Preview volume">' +
+                                '<span class="pm-vol-val"></span>';
+                            const input = bar.querySelector('input');
+                            input.addEventListener('input', () => {
+                                localStorage.setItem(KEY, String(input.value / 100));
+                                applyVol();
+                                refreshBar();
+                            });
+                            let lastNonZero = 1;
+                            bar.querySelector('.pm-vol-icon').addEventListener('click', () => {
+                                const cur = getVol();
+                                if (cur > 0) { lastNonZero = cur; localStorage.setItem(KEY, '0'); }
+                                else { localStorage.setItem(KEY, String(lastNonZero || 1)); }
+                                applyVol();
+                                refreshBar();
+                            });
+                            const vid = container.querySelector('video');
+                            const anchor = vid ? (vid.closest('.block') || vid.parentElement) : null;
+                            if (anchor && anchor.parentElement === container) {
+                                anchor.insertAdjacentElement('afterend', bar);
+                            } else {
+                                container.appendChild(bar);
+                            }
+                        }
+                        refreshBar();
+                    };
+                    const seen = new WeakSet();
+                    const sync = () => {
+                        ensureBar();
+                        videos().forEach(el => {
+                            if (!seen.has(el)) {
+                                seen.add(el);
+                                el.addEventListener('loadedmetadata', applyVol);
+                                el.addEventListener('play', applyVol);
+                            }
+                        });
+                        applyVol();
+                    };
+                    let scheduled = false;
+                    new MutationObserver(() => {
+                        if (scheduled) return;
+                        scheduled = true;
+                        requestAnimationFrame(() => { scheduled = false; sync(); });
+                    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'style', 'class'] });
+                    setTimeout(sync, 500);
+                })();
             }
         """
 
@@ -2084,7 +2314,34 @@ class PromptManagerPlugin(WAN2GPPlugin):
             return self._pick_folder_linux(title)
 
     def _pick_folder_windows(self, title):
-        """Use PowerShell + Shell.Application for the modern Windows folder picker."""
+        """Modern Windows folder picker (tkinter -> IFileDialog) run in a separate process.
+        The old Shell.Application BrowseForFolder dialog is cramped/truncated, so it is
+        only used as a last resort if the subprocess itself fails."""
+        script = (
+            "import sys, tkinter as tk\n"
+            "from tkinter import filedialog\n"
+            "root = tk.Tk()\n"
+            "root.withdraw()\n"
+            "root.attributes('-topmost', True)\n"
+            "root.update()\n"
+            "path = filedialog.askdirectory(parent=root, title=sys.argv[1], mustexist=True)\n"
+            "root.destroy()\n"
+            "sys.stdout.buffer.write((path or '').encode('utf-8'))\n"
+        )
+        try:
+            res = subprocess.run(
+                [sys.executable, "-c", script, title],
+                capture_output=True, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if res.returncode == 0:
+                # Empty output means the user cancelled - do NOT fall through to another dialog.
+                return os.path.normpath(res.stdout.decode("utf-8", errors="replace").strip()) if res.stdout.strip() else ""
+            print(f"tkinter folder dialog subprocess failed: {res.stderr.decode(errors='replace')}")
+        except Exception as e:
+            print(f"Windows folder dialog (tkinter subprocess) failed: {e}")
+
+        # Last resort: legacy Shell.Application dialog
         try:
             ps_cmd = (
                 "$shell = New-Object -ComObject Shell.Application; "
@@ -2099,8 +2356,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
                 return res.stdout.strip()
         except Exception as e:
             print(f"Windows folder dialog failed: {e}")
-        # Fallback to tkinter
-        return self._pick_folder_tkinter(title)
+        return ""
 
     def _pick_folder_macos(self, title):
         """Use osascript for the native macOS folder picker."""
@@ -2827,7 +3083,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
         for folder in folder_items:
             safe_path = json.dumps(folder["path"], ensure_ascii=False)
             items_html += f"""
-            <div class="pm-item pm-folder" data-path={safe_path} ondblclick="openPromptManagerFolder(event, this)">
+            <div class="pm-item pm-folder" data-path={safe_path} onclick="openPromptManagerFolder(event, this)">
                 <div class="pm-item-thumb" style="display:flex;align-items:center;justify-content:center;font-size:42px;">📁</div>
                 <div class="pm-item-label" title="{html.escape(folder['name'])}">{html.escape(folder['name'])}</div>
             </div>
@@ -3257,6 +3513,26 @@ class PromptManagerPlugin(WAN2GPPlugin):
             preview += f" — multipliers: {multipliers[:80]}"
         return preview
 
+    def _meta_field_html(self, label, value_html, field_id=None):
+        """One metadata field: label on top, value below (full width), buttons in a narrow right column.
+        Nothing is sent to the generator on a plain click - only the explicit send button does that."""
+        send_btn = ""
+        if field_id:
+            send_btn = (
+                f"<button class='pm-copy-btn pm-send-btn' "
+                f"onclick=\"applyPromptManagerField('{field_id}')\" "
+                f"title='Send this {html.escape(label)} to the generator'>➡️</button>"
+            )
+        return (
+            f"<tbody class='pm-field'>"
+            f"<tr><td class='pm-lbl'>{html.escape(label)}</td>"
+            f"<td class='pm-ico' rowspan='2'><div class='pm-ico-stack'>"
+            f"<button class='pm-copy-btn' onclick=\"copyPromptManagerValue(this)\" title='Copy'>📋</button>"
+            f"{send_btn}</div></td></tr>"
+            f"<tr><td class='pm-val'>{value_html}</td></tr>"
+            f"</tbody>"
+        )
+
     def _build_metadata_html(self, state, file_path, configs, library_entry=None):
         extra_rows = []
         if library_entry:
@@ -3283,9 +3559,7 @@ class PromptManagerPlugin(WAN2GPPlugin):
 
             rows.extend(extra_rows)
             body = "".join(
-                f"<tr><td>{html.escape(label)}</td>"
-                f"<td><b>{html.escape(str(value))}</b></td>"
-                f"<td><button class='pm-copy-btn' onclick=\"copyPromptManagerValue(this)\" title='Copy'>📋</button></td></tr>"
+                self._meta_field_html(label, f"<b>{html.escape(str(value))}</b>")
                 for label, value in rows
                 if value is not None
             )
@@ -3319,35 +3593,20 @@ class PromptManagerPlugin(WAN2GPPlugin):
                     f"<button class='pm-prompt-toggle' onclick='event.stopPropagation(); togglePMPrompt(this);'>...</button>"
                     f"</span>"
                 )
-                rows.append(
-                    f"<tr class='pm-clickable' onclick=\"applyPromptManagerField('{field_id}')\" "
-                    f"title='Click to use this {html.escape(label)} in the generator'>"
-                    f"<td>{html.escape(label)} ▸</td><td>{display}</td>"
-                    f"<td><button class='pm-copy-btn' onclick=\"event.stopPropagation(); copyPromptManagerValue(this)\" "
-                    f"title='Copy'>📋</button></td></tr>"
-                )
+                rows.append(self._meta_field_html(label, display, field_id))
             else:
                 display = html.escape(display_str).replace("\n", "<br>")
-                rows.append(
-                    f"<tr class='pm-clickable' onclick=\"applyPromptManagerField('{field_id}')\" "
-                    f"title='Click to use this {html.escape(label)} in the generator'>"
-                    f"<td>{html.escape(label)} ▸</td><td><b>{display}</b></td>"
-                    f"<td><button class='pm-copy-btn' onclick=\"event.stopPropagation(); copyPromptManagerValue(this)\" "
-                    f"title='Copy'>📋</button></td></tr>"
-                )
+                rows.append(self._meta_field_html(label, f"<b>{display}</b>", field_id))
 
         for label, value in extra_rows:
-            rows.append(
-                f"<tr><td>{html.escape(label)}</td><td><b>{html.escape(str(value))}</b></td>"
-                f"<td><button class='pm-copy-btn' onclick=\"copyPromptManagerValue(this)\" title='Copy'>📋</button></td></tr>"
-            )
+            rows.append(self._meta_field_html(label, f"<b>{html.escape(str(value))}</b>"))
 
         if not rows:
             return "<div class='pm-metadata'><p class='placeholder'>Metadata found but no reusable fields.</p></div>"
 
         return (
             "<div class='pm-metadata'>"
-            "<p class='pm-hint'>Click a row to send it to the generator, or use 📋 to copy.</p>"
+            "<p class='pm-hint'>Use ➡️ to send a field to the generator, or 📋 to copy.</p>"
             f"<table id='pm_info' width='100%'>{''.join(rows)}</table></div>"
         )
 
